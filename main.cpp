@@ -3,6 +3,7 @@
 #include<unistd.h>
 #include<pthread.h>
 #include<chrono>
+#include<fftw3.h>
 #include"portaudio.h"
 
 // Include ImGui headers
@@ -10,9 +11,14 @@
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
+// #include "imgui_piano/imgui_piano.h"
+// #include "imgui_piano/ImGui_Piano_imp.h"
+
+// Other code
+#include <utils/BiQuad.cpp>
 
 #define SAMPLE_RATE 44100
-#define FRAMES_PER_BUFFER 256
+#define FRAMES_PER_BUFFER 512
 
 float frequency = 440.0;
 int waveform = 0;
@@ -36,15 +42,99 @@ bool last_key_state = false;
 
 // envelope parameters
 double env_volume = 0;
-float attack = 0.5;
+float attack = 0;
 float decay = 0;
 float sustain = 1;
-float release = 0;
+float release = 0.2;
+
+// filter parameters
+float cutoff = 1000;
+float prev_cutoff = 1000;
+float alpha = 1;
+float y_prev = 0;
 
 
+double original_samples[FRAMES_PER_BUFFER];
+BiQuadFilter filter(SAMPLE_RATE, cutoff);
 
 bool running = true;
 
+
+
+bool PianoCallback(void* UserData, int Msg, int Key, float Vel) {
+		// if (Key >= 128) return false; // midi max keys
+		// if (Msg == NoteGetStatus) return KeyPresed[Key];
+		// if (Msg == NoteOn) { KeyPresed[Key] = true; Send_Midi_NoteOn(Key, Vel*127); }
+		// if (Msg == NoteOff) { KeyPresed[Key] = false; Send_Midi_NoteOff(Key, Vel*127);}
+		return false;
+}
+
+
+// void init_lowpass_filter() {
+//     float rc = 1.0 / (cutoff * 2 * M_PI);
+//     float dt = 1.0 / SAMPLE_RATE;
+
+//     alpha = dt / (rc + dt);
+//     y_prev = 0;
+
+//     printf("cutoff: %f\n", cutoff);
+//     printf("alpha: %f\n", alpha);
+// }
+
+// void update_lowpass_filter() {
+//     if(prev_cutoff != cutoff) {
+//         float rc = 1.0 / (cutoff * 2 * M_PI);
+//         float dt = 1.0 / SAMPLE_RATE;
+
+//         alpha = dt / (rc + dt);
+//         prev_cutoff = cutoff;
+
+//         printf("cutoff: %f\n", cutoff);
+//         printf("alpha: %f\n", alpha);
+//     }
+//     // else printf("same cutoff: %f\n", cutoff);
+// }
+
+// float lowpass_filter(float sample) {
+//     y_prev = alpha * sample + (1 - alpha) * y_prev;
+//     return y_prev;
+// }
+
+// void FFT_lowpass(double *in, double *out, int n, double cutoffFreq, double sampleRate) {
+//     fftw_complex *freqDomain;
+//     fftw_plan plan_forward, plan_backward;
+
+//     // Allocate memory for frequency domain representation
+//     freqDomain = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
+    
+//     // Create FFTW plans for forward and backward FFT
+//     plan_forward = fftw_plan_dft_r2c_1d(n, in, freqDomain, FFTW_ESTIMATE);
+//     plan_backward = fftw_plan_dft_c2r_1d(n, freqDomain, out, FFTW_ESTIMATE);
+
+//     // Perform forward FFT (time domain to frequency domain)
+//     fftw_execute(plan_forward);
+
+//     // Zero out frequencies above the cutoff frequency
+//     double freqResolution = sampleRate / n;
+//     int cutoffBin = (int)(cutoffFreq / freqResolution);
+//     for (int i = cutoffBin; i < n - cutoffBin; ++i) {
+//         freqDomain[i][0] = 0.0;
+//         freqDomain[i][1] = 0.0;
+//     }
+
+//     // Perform backward FFT (frequency domain to time domain)
+//     fftw_execute(plan_backward);
+
+//     // Normalize the output
+//     for (int i = 0; i < n; ++i) {
+//         out[i] /= n;
+//     }
+
+//     // Free FFTW resources
+//     fftw_destroy_plan(plan_forward);
+//     fftw_destroy_plan(plan_backward);
+//     fftw_free(freqDomain);
+// }
 
 // Function to update the envelope volume
 void *update_envelope(void *arg) {
@@ -96,8 +186,6 @@ void *update_envelope(void *arg) {
         elapsed_f /= 1000000000;
 
         // update envelope volume
-
-        printf  ("elapsed: %f\n", elapsed_f);
 
         // ATTACK
         if(trigger_phase == 1) {
@@ -152,33 +240,56 @@ int audioCallback(const void *inputBuffer, void *outputBuffer,
     (void) inputBuffer;
     double outputTime = (double) timeInfo->outputBufferDacTime;
 
-    float original_samples[FRAMES_PER_BUFFER];
+    if(filter.cutoffFreq != cutoff) filter.switchCutoff(cutoff);
 
     for(unsigned int i = 0; i < framesPerBuffer; i++)
     {
-        float sample = 0.0;
         if(waveform == 0) {
-            sample = sin(frequency * 2 * M_PI * (outputTime + (double) i / SAMPLE_RATE)); // Simple sine wave
+            original_samples[i] = sin(frequency * 2 * M_PI * (outputTime + (double) i / SAMPLE_RATE)); // Simple sine wave
         }
         else if(waveform == 1) {
-            sample = 2.0 * fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 1.0; // Simple sawtooth wave
+            original_samples[i] = 2.0 * fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 1.0; // Simple sawtooth wave
         }
         else if(waveform == 2) {
-            sample = fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) < 0.5 ? 1.0 : -1.0; // Simple square wave
+            original_samples[i] = fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) < 0.5 ? 1.0 : -1.0; // Simple square wave
+        }
+        else if(waveform == 3) {
+            original_samples[i] = 2.0 * (fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 0.5); // Simple triangle wave
         }
 
+        // original_samples[i] = sample;
+        // sample = lowpass_filter(sample);
 
         // Apply volume envelope
         // sample *= env_volume;
+        
 
         // *out++ = sample; // Left channel
         // *out++ = sample; // Right channel
     }
-    
+
+    double filtered_samples[FRAMES_PER_BUFFER];
+    // FFT_lowpass(original_samples, filtered_samples, FRAMES_PER_BUFFER, cutoff, SAMPLE_RATE);
+
+    for(unsigned int i = 0; i < framesPerBuffer; i++)
+    {
+        filtered_samples[i] = filter.process(original_samples[i]);
+        filtered_samples[i]  *= env_volume;
+        
+        *out++ = filtered_samples[i];
+        *out++ = filtered_samples[i];
+
+        // original_samples[i] = lowpass_filter(original_samples[i]);
+        // original_samples[i] *= env_volume;
+
+        // *out++ = original_samples[i];
+        // *out++ = original_samples[i];
+    }
 
     return paContinue;
 }
 
+/*
 void *parseUserInput(void *arg)
 {
     while (running)
@@ -204,7 +315,7 @@ void *parseUserInput(void *arg)
         }
     }
     return NULL;
-}
+}*/
 
 int main()
 {
@@ -272,8 +383,10 @@ int main()
     ImGui_ImplOpenGL3_Init("#version 330");
 
 
+    // init_lowpass_filter();
 
     pthread_create(&adsr_thread, NULL, update_envelope, NULL);
+    // pthread_create(&filter_thread, NULL, update_lowpass_filter, NULL);
 
 
     while (!glfwWindowShouldClose(window))
@@ -289,12 +402,16 @@ int main()
         ImGui::Text("[DEBUG] Frequency: %.2f Hz", frequency);
         ImGui::SliderFloat("Set Frequency", &frequency, 20.0f, 2000.0f);
 
-        // ImGui::Text("Cutoff Frequency: %.2f Hz", cutoff);
-        // ImGui::SliderFloat("Set Cutoff Frequency", &cutoff, 20.0f, 5000.0f);
+        ImGui::Text("Cutoff Frequency: %.2f Hz", cutoff);
+        ImGui::SliderFloat("Set Cutoff Frequency", &cutoff, 20.0f, 5000.0f);
 
         ImGui::Text("Waveform Type: %d", waveform);
-        const char* waveformTypes[] = { "Sine", "Square", "Triangle" };
+        const char* waveformTypes[] = { "Sine", "Square", "Triangle", "Sawtooth" };
         ImGui::Combo("Set Waveform Type", &waveform, waveformTypes, IM_ARRAYSIZE(waveformTypes));
+
+        ImGui::PlotLines("Samples", (float *)original_samples, FRAMES_PER_BUFFER);
+
+
         
 
         ImGui::End();
@@ -316,6 +433,14 @@ int main()
         ImGui::Text("[DEBUG] Envelope Volume: %.2f", env_volume);
 
         ImGui::End();
+
+
+
+        // ImGui::Begin("Piano Roll");
+        // static int PrevNoteActive = -1;
+        // ImGui_PianoKeyboard("PianoTest", ImVec2(1024, 100), &PrevNoteActive, 21, 108, PianoCallback, nullptr, nullptr);
+        // ImGuiExt::Piano::Keyboard("PianoTest", ImVec2(1024, 100), &PrevNoteActive, 21, 108, nullptr, nullptr, nullptr);
+        // ImGui::End();
 
         // Rendering
         int display_w, display_h;
@@ -339,6 +464,8 @@ int main()
         }
 
         glfwSwapBuffers(window);
+
+        // update_lowpass_filter();
     }
 
     running = false;
