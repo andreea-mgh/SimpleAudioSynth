@@ -1,3 +1,3 @@
-# SimpleAudioSynth
+# Simple Audio Synth
 
-it goes bzzzz/zhhhhh/ouououou
+Audio synth project made in C++ using the ImGui framework and PortAudio.
