@@ -1,31 +1,47 @@
 #include<iostream>
+#include<fstream>
+#include<sstream>
 #include<cmath>
 #include<unistd.h>
 #include<pthread.h>
 #include<chrono>
-#include<fftw3.h>
 #include"portaudio.h"
 
-// Include ImGui headers
+// ImGui headers
 #include <GLFW/glfw3.h>
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
-// #include "imgui_piano/imgui_piano.h"
-// #include "imgui_piano/ImGui_Piano_imp.h"
 
-// Other code
+// my code
 #include <utils/BiQuad.cpp>
+#include <utils/imstyle.cpp>
 
 #define SAMPLE_RATE 44100
 #define FRAMES_PER_BUFFER 512
+#define OSCILLATOR_COUNT 3
 
-float frequency = 440.0;
-int waveform = 0;
-// ---- SHAPE -|
-// 0: sine     |
-// 1: sawtooth |
-// 2: square   |
+
+const int keyboard_mapping[12] = {GLFW_KEY_Z, GLFW_KEY_S, GLFW_KEY_X, GLFW_KEY_D, GLFW_KEY_C, GLFW_KEY_V, GLFW_KEY_G, GLFW_KEY_B, GLFW_KEY_H, GLFW_KEY_N, GLFW_KEY_J, GLFW_KEY_M};
+// C # D # E  F # G # A # B
+// Z S X D C  V G B H N J M
+
+
+int current_note = 49;
+int last_keyboard_press = -1;
+int global_octave = 4;
+float cutoff = 1000;
+
+struct oscillator {
+    bool enabled = true;
+    int detune_cts = 0;
+    int detune_st = 0;
+    int rel_octave = 0;
+    int waveform = 0;
+    float pan = 0;
+    float volume = 1;
+    BiQuadFilter filter = BiQuadFilter(SAMPLE_RATE, cutoff);
+} osc[OSCILLATOR_COUNT];
 
 int trigger_phase = 0;
 // -- ENVELOPE PHASE -|
@@ -47,133 +63,75 @@ float decay = 0;
 float sustain = 1;
 float release = 0.2;
 
-// filter parameters
-float cutoff = 1000;
-float prev_cutoff = 1000;
-float alpha = 1;
-float y_prev = 0;
-
-
-double original_samples[FRAMES_PER_BUFFER];
-BiQuadFilter filter(SAMPLE_RATE, cutoff);
 
 bool running = true;
 
 
 
-bool PianoCallback(void* UserData, int Msg, int Key, float Vel) {
-		// if (Key >= 128) return false; // midi max keys
-		// if (Msg == NoteGetStatus) return KeyPresed[Key];
-		// if (Msg == NoteOn) { KeyPresed[Key] = true; Send_Midi_NoteOn(Key, Vel*127); }
-		// if (Msg == NoteOff) { KeyPresed[Key] = false; Send_Midi_NoteOff(Key, Vel*127);}
-		return false;
+float keyToFreq(int key, int detune_cts = 0) {
+    float result_key = key + (float)(detune_cts)/100;
+    float result = pow(2, ((result_key-49) / 12)) * 440.0;
+    // printf("%.2f: %.2f\n", result_key, result);
+    return result;
 }
 
-
-// void init_lowpass_filter() {
-//     float rc = 1.0 / (cutoff * 2 * M_PI);
-//     float dt = 1.0 / SAMPLE_RATE;
-
-//     alpha = dt / (rc + dt);
-//     y_prev = 0;
-
-//     printf("cutoff: %f\n", cutoff);
-//     printf("alpha: %f\n", alpha);
-// }
-
-// void update_lowpass_filter() {
-//     if(prev_cutoff != cutoff) {
-//         float rc = 1.0 / (cutoff * 2 * M_PI);
-//         float dt = 1.0 / SAMPLE_RATE;
-
-//         alpha = dt / (rc + dt);
-//         prev_cutoff = cutoff;
-
-//         printf("cutoff: %f\n", cutoff);
-//         printf("alpha: %f\n", alpha);
-//     }
-//     // else printf("same cutoff: %f\n", cutoff);
-// }
-
-// float lowpass_filter(float sample) {
-//     y_prev = alpha * sample + (1 - alpha) * y_prev;
-//     return y_prev;
-// }
-
-// void FFT_lowpass(double *in, double *out, int n, double cutoffFreq, double sampleRate) {
-//     fftw_complex *freqDomain;
-//     fftw_plan plan_forward, plan_backward;
-
-//     // Allocate memory for frequency domain representation
-//     freqDomain = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
+void *keyboard_input(void *arg) {
+    GLFWwindow* window = (GLFWwindow*) arg;
+    while(running) {
+        for(int i=0; i<12; i++) {
+            if(glfwGetKey(window, keyboard_mapping[i]) == GLFW_PRESS && !last_key_state) {
+                // printf("doink %d\n", i);
+                key_pressed = true;
+                last_key_state = true;
+                last_keyboard_press = i;
+                current_note = 12*(global_octave-1) + i+4;
+                trigger_phase = 0;
+                i=12;
+            }
+        }
+        if(last_key_state && glfwGetKey(window, keyboard_mapping[last_keyboard_press]) == GLFW_RELEASE) {
+            // printf("undoink %d\n", last_keyboard_press);
+            key_released = true;
+            last_key_state = false;
+        }
+    }
     
-//     // Create FFTW plans for forward and backward FFT
-//     plan_forward = fftw_plan_dft_r2c_1d(n, in, freqDomain, FFTW_ESTIMATE);
-//     plan_backward = fftw_plan_dft_c2r_1d(n, freqDomain, out, FFTW_ESTIMATE);
 
-//     // Perform forward FFT (time domain to frequency domain)
-//     fftw_execute(plan_forward);
+    return NULL;
+}
 
-//     // Zero out frequencies above the cutoff frequency
-//     double freqResolution = sampleRate / n;
-//     int cutoffBin = (int)(cutoffFreq / freqResolution);
-//     for (int i = cutoffBin; i < n - cutoffBin; ++i) {
-//         freqDomain[i][0] = 0.0;
-//         freqDomain[i][1] = 0.0;
-//     }
-
-//     // Perform backward FFT (frequency domain to time domain)
-//     fftw_execute(plan_backward);
-
-//     // Normalize the output
-//     for (int i = 0; i < n; ++i) {
-//         out[i] /= n;
-//     }
-
-//     // Free FFTW resources
-//     fftw_destroy_plan(plan_forward);
-//     fftw_destroy_plan(plan_backward);
-//     fftw_free(freqDomain);
-// }
-
-// Function to update the envelope volume
+// Envelope volume
 void *update_envelope(void *arg) {
     auto previousTime = std::chrono::steady_clock::now();
 
     while(running) {
         // update phase
         if(key_pressed) {
-            printf("key pressed: ");
-            if(attack == 0) {
-                if(decay == 0) {
+            if(attack == 0.0) {
+                if(decay == 0.0) {
                     // HOLD
                     trigger_phase = 3;
-                    printf("hold\n");
                 }
                 else {
                     // DECAY
+                    env_volume = 1.0;
                     trigger_phase = 2;
-                    printf("decay\n");
                 }
             }
             else {
                 // ATTACK
                 trigger_phase = 1;
-                printf("attack\n");
             }
             key_pressed = false;
         }
         if(key_released) {
-            printf("key released: ");
             if(release == 0) {
                 // IDLE
                 trigger_phase = 0;
-                printf("idle\n");
             }
             else {
                 // RELEASE
                 trigger_phase = 4;
-                printf("release\n");
             }
             key_released = false;
         }
@@ -191,7 +149,6 @@ void *update_envelope(void *arg) {
         if(trigger_phase == 1) {
             env_volume += elapsed_f / attack;
             if(env_volume >= 1.0) {
-                printf("decay\n");
                 trigger_phase = 2;
                 env_volume = 1.0;
             }
@@ -200,7 +157,6 @@ void *update_envelope(void *arg) {
         else if(trigger_phase == 2) {
             env_volume -= elapsed_f / decay;
             if(env_volume <= sustain) {
-                printf("hold\n");
                 trigger_phase = 3;
                 env_volume = sustain;
             }
@@ -213,7 +169,6 @@ void *update_envelope(void *arg) {
         else if(trigger_phase == 4) {
             env_volume -= elapsed_f / release;
             if(env_volume <= 0.0) {
-                printf("idle\n");
                 trigger_phase = 0;
                 env_volume = 0.0;
             }
@@ -229,7 +184,132 @@ void *update_envelope(void *arg) {
     return NULL;
 }
 
-// Audio callback function
+void reset_preset() {
+    cutoff = 1000;
+    attack = 0;
+    decay = 0;
+    sustain = 1;
+    release = 0;
+    global_octave = 4;
+    for(int i=0; i<OSCILLATOR_COUNT; i++) {
+        osc[i].enabled = true;
+        osc[i].detune_cts = 0;
+        osc[i].detune_st = 0;
+        osc[i].rel_octave = 0;
+        osc[i].waveform = 0;
+        osc[i].pan = 0;
+        osc[i].volume = 1;
+    }
+
+}
+
+void save_preset(char* filename) {
+    std::ofstream file(filename);
+    if(file.is_open()) {
+        file << "CUTOFF " << cutoff << std::endl;
+        file << "ATTACK " << attack << std::endl;
+        file << "DECAY " << decay << std::endl;
+        file << "SUSTAIN " << sustain << std::endl;
+        file << "RELEASE " << release << std::endl;
+        file << "GLOBAL_OCTAVE " << global_octave << std::endl;
+        for(int i=0; i<OSCILLATOR_COUNT; i++) {
+            file << "OSCILLATOR " << i << std::endl;
+            file << "ENABLED " << osc[i].enabled << std::endl;
+            file << "DETUNE_C " << osc[i].detune_cts << std::endl;
+            file << "DETUNE_S " << osc[i].detune_st << std::endl;
+            file << "OCTAVE " << osc[i].rel_octave << std::endl;
+            file << "WAVEFORM " << osc[i].waveform << std::endl;
+            file << "PAN " << osc[i].pan << std::endl;
+            file << "VOLUME " << osc[i].volume << std::endl;
+            file << "OSC_END" << std::endl;
+        }
+        file.close();
+    }
+    else {
+        std::cerr << "Could not open file " << filename << std::endl;
+    }    
+}
+
+void load_preset(char* filename) {
+    std::ifstream file(filename);
+    if(file.is_open()) {
+        std::string line;
+        while(std::getline(file, line)) {
+            std::string token;
+            std::istringstream iss(line);
+            iss >> token;
+            if(token == "CUTOFF") {
+                iss >> cutoff;
+            }
+            else if(token == "ATTACK") {
+                iss >> attack;
+            }
+            else if(token == "DECAY") {
+                iss >> decay;
+            }
+            else if(token == "SUSTAIN") {
+                iss >> sustain;
+            }
+            else if(token == "RELEASE") {
+                iss >> release;
+            }
+            else if(token == "GLOBAL_OCTAVE") {
+                iss >> global_octave;
+            }
+            else if(token == "OSCILLATOR") {
+                int osc_num;
+                iss >> osc_num;
+                while(std::getline(file, line)) {
+                    std::istringstream iss(line);
+                    iss >> token;
+                    if(token == "ENABLED") {
+                        iss >> osc[osc_num].enabled;
+                        printf("osc %d enabled: %d\n", osc_num, osc[osc_num].enabled);
+                    }
+                    else if(token == "DETUNE_C") {
+                        iss >> osc[osc_num].detune_cts;
+                        printf("osc %d detune_c: %d\n", osc_num, osc[osc_num].detune_cts);
+                    }
+                    else if(token == "DETUNE_S") {
+                        iss >> osc[osc_num].detune_st;
+                        printf("osc %d detune_s: %d\n", osc_num, osc[osc_num].detune_st);
+                    }
+                    else if(token == "OCTAVE") {
+                        iss >> osc[osc_num].rel_octave;
+                        printf("osc %d octave: %d\n", osc_num, osc[osc_num].rel_octave);
+                    }
+                    else if(token == "WAVEFORM") {
+                        iss >> osc[osc_num].waveform;
+                        printf("osc %d waveform: %d\n", osc_num, osc[osc_num].waveform);
+                    }
+                    else if(token == "PAN") {
+                        iss >> osc[osc_num].pan;
+                        printf("osc %d pan: %f\n", osc_num, osc[osc_num].pan);
+                    }
+                    else if(token == "VOLUME") {
+                        iss >> osc[osc_num].volume;
+                        printf("osc %d volume: %f\n", osc_num, osc[osc_num].volume);
+                    }
+                    else if(token == "OSC_END") {
+                        break;
+                    }
+                    else {
+                        std::cerr << "Unknown token " << token << std::endl;
+                    }
+                }
+            }
+        
+        }
+    }
+    else {
+        std::cerr << "Could not open file " << filename << std::endl;
+    }
+}
+
+
+float original_samples[FRAMES_PER_BUFFER];
+
+// Audio callback
 int audioCallback(const void *inputBuffer, void *outputBuffer,
                   unsigned long framesPerBuffer,
                   const PaStreamCallbackTimeInfo *timeInfo,
@@ -240,88 +320,76 @@ int audioCallback(const void *inputBuffer, void *outputBuffer,
     (void) inputBuffer;
     double outputTime = (double) timeInfo->outputBufferDacTime;
 
-    if(filter.cutoffFreq != cutoff) filter.switchCutoff(cutoff);
+    float final_samples_L[framesPerBuffer];
+    float final_samples_R[framesPerBuffer];
+    for(unsigned int i=0; i<framesPerBuffer; i++) final_samples_L[i]=0;
+    for(unsigned int i=0; i<framesPerBuffer; i++) final_samples_R[i]=0;
 
-    for(unsigned int i = 0; i < framesPerBuffer; i++)
-    {
-        if(waveform == 0) {
-            original_samples[i] = sin(frequency * 2 * M_PI * (outputTime + (double) i / SAMPLE_RATE)); // Simple sine wave
-        }
-        else if(waveform == 1) {
-            original_samples[i] = 2.0 * fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 1.0; // Simple sawtooth wave
-        }
-        else if(waveform == 2) {
-            original_samples[i] = fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) < 0.5 ? 1.0 : -1.0; // Simple square wave
-        }
-        else if(waveform == 3) {
-            original_samples[i] = 2.0 * (fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 0.5); // Simple triangle wave
-        }
 
-        // original_samples[i] = sample;
-        // sample = lowpass_filter(sample);
 
-        // Apply volume envelope
-        // sample *= env_volume;
-        
+    int active_osc = 0;
+    for(int o=0; o<OSCILLATOR_COUNT; o++) {
+        if(osc[o].enabled) {
+            active_osc++;
 
-        // *out++ = sample; // Left channel
-        // *out++ = sample; // Right channel
+            float frequency = keyToFreq(current_note+12*osc[o].rel_octave+osc[o].detune_st, osc[o].detune_cts);
+            if(osc[o].filter.cutoffFreq != cutoff) osc[o].filter.switchCutoff(cutoff);
+
+            // initial waveform
+            for(unsigned int i = 0; i < framesPerBuffer; i++)
+            {
+                // SINE
+                if(osc[o].waveform == 0) {
+                    original_samples[i] = sin(frequency * 2 * M_PI * (outputTime + (double) i / SAMPLE_RATE));
+                }
+                // SAWTOOTH
+                else if(osc[o].waveform == 1) {
+                    original_samples[i] = 2.0 * fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 1.0;
+                }
+                // SQUARE
+                else if(osc[o].waveform == 2) {
+                    original_samples[i] = (sin(frequency * 2 * M_PI * (outputTime + (double) i / SAMPLE_RATE))) > 0 ? 1 : -1;
+                }
+                // TRIANGLE
+                else if(osc[o].waveform == 3) {
+                    original_samples[i] = 2.0 * (fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 0.5);
+                }
+            }
+
+            // additional processing
+            for(unsigned int i = 0; i < framesPerBuffer; i++)
+            {
+                // FILTER
+                float sample = osc[o].filter.process(original_samples[i]);
+                // float sample = original_samples[i];
+
+                // PAN
+                final_samples_L[i] += sample * std::min(1.0f, (1-osc[o].pan)) * osc[o].volume;
+                final_samples_R[i] += sample * std::min(1.0f, (1+osc[o].pan)) * osc[o].volume;
+            }
+        }
     }
 
-    double filtered_samples[FRAMES_PER_BUFFER];
-    // FFT_lowpass(original_samples, filtered_samples, FRAMES_PER_BUFFER, cutoff, SAMPLE_RATE);
+    // send to audio stream
+    if(active_osc)
+    for(unsigned int i=0; i<framesPerBuffer; i++) {
+        final_samples_L[i] = (final_samples_L[i]) * env_volume;
+        final_samples_R[i] = (final_samples_R[i]) * env_volume;
+        *out++ = final_samples_L[i];
+        *out++ = final_samples_R[i];
 
-    for(unsigned int i = 0; i < framesPerBuffer; i++)
-    {
-        filtered_samples[i] = filter.process(original_samples[i]);
-        filtered_samples[i]  *= env_volume;
-        
-        *out++ = filtered_samples[i];
-        *out++ = filtered_samples[i];
-
-        // original_samples[i] = lowpass_filter(original_samples[i]);
-        // original_samples[i] *= env_volume;
-
-        // *out++ = original_samples[i];
-        // *out++ = original_samples[i];
+        // *out++ = original_samples[i]*env_volume;
+        // *out++ = original_samples[i]*env_volume;
     }
 
     return paContinue;
 }
 
-/*
-void *parseUserInput(void *arg)
-{
-    while (running)
-    {
-        char option;
-        std::cout << "Enter option (f:frequency, w:waveform, q:quit)\n>";
-        std::cin >> option;
-        switch(option) {
-            case 'f':
-                std::cout << "Enter new frequency: ";
-                std::cin >> frequency;
-                break;
-            case 'w':
-                std::cout << "Enter new waveform (0:sine, 1:sawtooth, 2:square): ";
-                std::cin >> waveform;
-                break;
-            case 'q':
-                running = false;
-                break;
-            default:
-                std::cout << "Invalid option" << std::endl;
-                break;
-        }
-    }
-    return NULL;
-}*/
-
 int main()
 {
     PaError err;
     PaStream *stream;
-    pthread_t adsr_thread;
+    pthread_t adsr_thread, input_thread;
 
 
     err = Pa_Initialize();
@@ -353,7 +421,7 @@ int main()
         return 1;
     }
 
-
+    load_preset("presets/latest.preset");
 
     // Initialize ImGui
     if (!glfwInit()) {
@@ -368,9 +436,8 @@ int main()
         return -1;
     }
 
-    // Make the window's context current
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); // Enable vsync
+    glfwSwapInterval(1); // vsync
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -378,16 +445,16 @@ int main()
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
+    SetupImGuiStyle();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
 
-    // init_lowpass_filter();
-
     pthread_create(&adsr_thread, NULL, update_envelope, NULL);
-    // pthread_create(&filter_thread, NULL, update_lowpass_filter, NULL);
+    pthread_create(&input_thread, NULL, keyboard_input, window);
 
+    char name[32] = "", filename[48];
 
     while (!glfwWindowShouldClose(window))
     {
@@ -399,22 +466,38 @@ int main()
         // ImGui interface code
         ImGui::Begin("Simple Synthesizer");
 
-        ImGui::Text("[DEBUG] Frequency: %.2f Hz", frequency);
-        ImGui::SliderFloat("Set Frequency", &frequency, 20.0f, 2000.0f);
-
-        ImGui::Text("Cutoff Frequency: %.2f Hz", cutoff);
+        ImGui::SliderInt("Set Current Octave", &global_octave, 1, 7);
         ImGui::SliderFloat("Set Cutoff Frequency", &cutoff, 20.0f, 5000.0f);
+        if(ImGui::Button("Big Reset Button")) {
+            reset_preset();
+        }
+        // ImGui::PlotLines("Samples", original_samples, FRAMES_PER_BUFFER);
 
-        ImGui::Text("Waveform Type: %d", waveform);
-        const char* waveformTypes[] = { "Sine", "Square", "Triangle", "Sawtooth" };
-        ImGui::Combo("Set Waveform Type", &waveform, waveformTypes, IM_ARRAYSIZE(waveformTypes));
+        ImGui::End();
 
-        ImGui::PlotLines("Samples", (float *)original_samples, FRAMES_PER_BUFFER);
 
+        // generate window for each oscillator
+        for(int i=0; i<OSCILLATOR_COUNT; i++) {
+            char title[16];
+            sprintf(title, "Oscillator #%d", i+1);
+            ImGui::Begin(title);
+
+            if(i) ImGui::Checkbox("Enabled", &osc[i].enabled);
+
+            const char* waveformTypes[] = { "Sine", "Sawtooth", "Square", "Triangle"};
+            ImGui::Combo("Waveform Type", &osc[i].waveform, waveformTypes, IM_ARRAYSIZE(waveformTypes));
+
+            ImGui::SliderFloat("Volume", &osc[i].volume, 0, 2);
+            ImGui::SliderInt("Dt Cents", &osc[i].detune_cts, 0, 100);
+            ImGui::SliderInt("Dt Semitones", &osc[i].detune_st, -12, 12);
+            ImGui::SliderInt("Octave", &osc[i].rel_octave, -3, 3);
+            ImGui::SliderFloat("Pan", &osc[i].pan, -1, 1);
+
+            ImGui::End();
+        }
 
         
 
-        ImGui::End();
 
         ImGui::Begin("ADSR Envelope");
 
@@ -430,46 +513,55 @@ int main()
         ImGui::Text("Release: %.2f s", release);
         ImGui::SliderFloat("Set Release", &release, 0.0f, 5.0f);
 
-        ImGui::Text("[DEBUG] Envelope Volume: %.2f", env_volume);
-
         ImGui::End();
 
 
 
-        // ImGui::Begin("Piano Roll");
-        // static int PrevNoteActive = -1;
-        // ImGui_PianoKeyboard("PianoTest", ImVec2(1024, 100), &PrevNoteActive, 21, 108, PianoCallback, nullptr, nullptr);
-        // ImGuiExt::Piano::Keyboard("PianoTest", ImVec2(1024, 100), &PrevNoteActive, 21, 108, nullptr, nullptr, nullptr);
-        // ImGui::End();
+        ImGui::Begin("DEBOOG");
+        //  BASIC
+        // ImGui::Text("Frequency: %.2f Hz", keyToFreq(current_note));
+        //  ENVELOPE
+        ImGui::Text("Envelope Volume: %.2f", env_volume);
+        ImGui::Text("Envelope Phase: %d", trigger_phase);
+        //  KEYS
+        ImGui::Text("Last Key: %d", last_key_state);
+        ImGui::Text("Key Pressed? %s", key_pressed ? "yes" : "no");
+        ImGui::Text("Key Released? %s", key_released ? "yes" : "no");
+        ImGui::Text("Last Key State: %s", last_key_state ? "yes" : "no");
+        //  PARAMS
+
+
+        ImGui::End();
+
+
+        ImGui::Begin("Presets");
+        ImGui::InputText("Preset Name", name, 48);
+        sprintf(filename, "presets/%s.preset", name);
+        if(ImGui::Button("Save Preset")) {
+            save_preset(filename);
+        }
+        if(ImGui::Button("Load Preset")) {
+            load_preset(filename);
+        }
+        ImGui::End();
+
 
         // Rendering
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
-        glClearColor(0.45f, 0.55f, 0.60f, 1.00f);
+        glClearColor(0.3f, 0.3f, 0.3f, 1.00f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-
-        // Detect key press and release
-        if(glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && !last_key_state) {
-            key_pressed = true;
-            last_key_state = true;
-        }
-        if(glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_RELEASE && last_key_state) {
-            key_released = true;
-            last_key_state = false;
-        }
-
         glfwSwapBuffers(window);
-
-        // update_lowpass_filter();
     }
 
     running = false;
-    pthread_join(adsr_thread, NULL); // Wait for thread to finish
+    pthread_join(adsr_thread, NULL);
+    pthread_join(input_thread, NULL);
 
     err = Pa_StopStream(stream);
     if (err != paNoError) {
@@ -488,6 +580,8 @@ int main()
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+
+    save_preset("presets/latest.preset");
 
     return 0;
 }
