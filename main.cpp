@@ -63,8 +63,8 @@ float decay = 0;
 float sustain = 1;
 float release = 0.2;
 
-BiQuadFilter filter1;
-BiQuadFilter filter2;
+BiQuadFilter filter1 = BiQuadFilter(SAMPLE_RATE, cutoff);
+BiQuadFilter filter2 = BiQuadFilter(SAMPLE_RATE, cutoff);
 
 
 bool running = true;
@@ -355,7 +355,7 @@ int audioCallback(const void *inputBuffer, void *outputBuffer,
                 }
                 // TRIANGLE
                 else if(osc[o].waveform == 3) {
-                    original_samples[i] = 2.0 * (fmod((frequency * (outputTime + (double) i / SAMPLE_RATE)), 1.0) - 0.5);
+                    original_samples[i] = 2/M_PI * asin( sin(2 * M_PI * frequency * (outputTime + (double) i / SAMPLE_RATE)) );
                 }
             }
 
@@ -471,12 +471,13 @@ int main()
         // ImGui interface code
         ImGui::Begin("Simple Synthesizer");
 
+        // ImGui::PlotLines("Samples", original_samples, FRAMES_PER_BUFFER);
+
         ImGui::SliderInt("Set Current Octave", &global_octave, 1, 7);
         ImGui::SliderFloat("Set Cutoff Frequency", &cutoff, 20.0f, 5000.0f);
         if(ImGui::Button("Big Reset Button")) {
             reset_preset();
         }
-        // ImGui::PlotLines("Samples", original_samples, FRAMES_PER_BUFFER);
 
         ImGui::End();
 
