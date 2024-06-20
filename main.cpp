@@ -63,6 +63,9 @@ float decay = 0;
 float sustain = 1;
 float release = 0.2;
 
+BiQuadFilter filter1;
+BiQuadFilter filter2;
+
 
 bool running = true;
 
@@ -325,7 +328,7 @@ int audioCallback(const void *inputBuffer, void *outputBuffer,
     for(unsigned int i=0; i<framesPerBuffer; i++) final_samples_L[i]=0;
     for(unsigned int i=0; i<framesPerBuffer; i++) final_samples_R[i]=0;
 
-
+    if(filter1.cutoffFreq != cutoff) { filter1.switchCutoff(cutoff); filter2.switchCutoff(cutoff); }
 
     int active_osc = 0;
     for(int o=0; o<OSCILLATOR_COUNT; o++) {
@@ -360,12 +363,12 @@ int audioCallback(const void *inputBuffer, void *outputBuffer,
             for(unsigned int i = 0; i < framesPerBuffer; i++)
             {
                 // FILTER
-                float sample = osc[o].filter.process(original_samples[i]);
+                // float sample = osc[o].filter.process(original_samples[i]);
                 // float sample = original_samples[i];
 
                 // PAN
-                final_samples_L[i] += sample * std::min(1.0f, (1-osc[o].pan)) * osc[o].volume;
-                final_samples_R[i] += sample * std::min(1.0f, (1+osc[o].pan)) * osc[o].volume;
+                final_samples_L[i] += original_samples[i] * std::min(1.0f, (1-osc[o].pan)) * osc[o].volume;
+                final_samples_R[i] += original_samples[i] * std::min(1.0f, (1+osc[o].pan)) * osc[o].volume;
             }
         }
     }
@@ -373,6 +376,8 @@ int audioCallback(const void *inputBuffer, void *outputBuffer,
     // send to audio stream
     if(active_osc)
     for(unsigned int i=0; i<framesPerBuffer; i++) {
+        final_samples_L[i] = filter1.process(final_samples_L[i]);
+        final_samples_L[i] = filter2.process(final_samples_R[i]);
         final_samples_L[i] = (final_samples_L[i]) * env_volume;
         final_samples_R[i] = (final_samples_R[i]) * env_volume;
         *out++ = final_samples_L[i];
